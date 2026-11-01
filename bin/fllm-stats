@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Summarize FreeLLMAPI usage logged by fllm.
+LOG=${FLLM_LOG:-$HOME/.local/state/fllm/usage.tsv}
+[ -f "$LOG" ] || { echo "no usage yet"; exit 0; }
+awk -F'\t' 'NR>1{c[$4" ("$5")"]++; if($9=="ok"){i+=$6;o+=$7;ok++}else fail++; t[$4" ("$5")"]+=$6+$7}
+END{printf "calls ok=%d fail=%d | tokens in=%d out=%d total=%d\n",ok,fail,i,o,i+o;
+for(k in c) printf "  %-50s calls=%d tok=%d\n",k,c[k],t[k]}' "$LOG"

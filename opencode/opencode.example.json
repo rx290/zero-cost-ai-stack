@@ -1,0 +1,40 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "freellmapi": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "FreeLLMAPI router",
+      "options": {
+        "baseURL": "http://localhost:3001/v1",
+        "apiKey": "{file:~/.config/freellmapi-key}"
+      },
+      "models": {
+        "gemini-3-flash-preview": {
+          "name": "gemini-3-flash-preview",
+          "tools": true
+        },
+        "devstral-2": {
+          "name": "devstral-2",
+          "tools": true
+        },
+        "qwen3.8-27b": {
+          "name": "qwen3.8-27b",
+          "tools": true
+        },
+        "minimax-m2.5": {
+          "name": "minimax-m2.5",
+          "tools": true
+        },
+        "mistral-large-3": {
+          "name": "mistral-large-3",
+          "tools": true
+        },
+        "gpt-oss-120b": {
+          "name": "gpt-oss-120b",
+          "tools": true
+        }
+      }
+    }
+  },
+  "model": "freellmapi/mistral-large-3"
+}

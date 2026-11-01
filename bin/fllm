@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# fllm: send a task to the local FreeLLMAPI router with pinned model tiers.
+# Usage: fllm [-t tier] [-s system] [-f file]... [-o outfile] [-g tag] "instruction"
+#        cat file | fllm -t long "summarize"
+# Tiers (first model that answers wins, the rest are fallbacks):
+#   fast  short drafts, rewrites, classification
+#   code  boilerplate, tests, scripts
+#   smart reasoning-heavy drafts, reviews of prose
+#   long  big inputs (logs, transcripts, many files), 1M context
+# Never pipe secrets, keys, credentials, or customer or work data in here.
+set -euo pipefail
+KEY=$(cat "$HOME/.config/freellmapi-key")
+URL=${FLLM_URL:-http://localhost:3001/v1/chat/completions}
+LOG=${FLLM_LOG:-$HOME/.local/state/fllm/usage.tsv}
+TIER=smart SYS="" OUT="" TAG="-" FILES=()
+while getopts "t:s:f:o:g:" o; do case $o in
+  t) TIER=$OPTARG;; s) SYS=$OPTARG;; f) FILES+=("$OPTARG");; o) OUT=$OPTARG;; g) TAG=$OPTARG;;
+  *) exit 2;; esac; done
+shift $((OPTIND-1))
+case $TIER in
+  fast)  CHAIN="gpt-oss-120b mistral-medium-3.5 gemini-3.5-flash";;
+  code)  CHAIN="devstral-2 mistral-large-3 gpt-oss-120b nemotron-3-super-120b codestral";;
+  smart) CHAIN="mistral-large-3 gemini-3.8-flash nemotron-3-super-120b gpt-oss-120b glm-5.3";;
+  long)  CHAIN="gemini-3.8-flash mistral-large-3 mistral-medium-3.5 gemini-3.5-flash";;
+  *) echo "unknown tier: $TIER (fast|code|smart|long)" >&2; exit 2;;
+esac
+[ -n "${FLLM_MODEL:-}" ] && CHAIN="$FLLM_MODEL $CHAIN"
+
+PROMPT=${1:-}
+for f in "${FILES[@]}"; do PROMPT+=$'\n\n'"=== FILE: $f ==="$'\n'"$(cat "$f")"; done
+if [ -p /dev/stdin ] || [ -f /dev/stdin ]; then PROMPT+=$'\n\n'"$(cat)"; fi
+[ -z "$PROMPT" ] && { echo "usage: fllm [-t fast|code|smart|long] \"instruction\"" >&2; exit 2; }
+
+# Secret guard: refuse obvious credentials rather than ship them to a third party.
+if grep -qE 'freellmapi-[0-9a-f]{20,}|sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{30,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY' <<<"$PROMPT$SYS"; then
+  echo "fllm: refused, input looks like it contains a secret" >&2; exit 3
+fi
+
+mkdir -p "$(dirname "$LOG")"
+[ -f "$LOG" ] || printf "time\ttier\ttag\tmodel\tplatform\tin\tout\tsecs\tstatus\n" >"$LOG"
+for M in $CHAIN; do
+  t0=$(date +%s)
+  R=$(jq -n --arg p "$PROMPT" --arg s "$SYS" --arg m "$M" \
+      '{model:$m, max_tokens:16000, messages:((if $s=="" then [] else [{role:"system",content:$s}] end)+[{role:"user",content:$p}])}' |
+      curl -sS -m ${FLLM_TIMEOUT:-90} "$URL" -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d @- 2>&1) || R='{"error":{"message":"curl failed"}}'
+  secs=$(( $(date +%s) - t0 ))
+  TXT=$(jq -r '.choices[0].message.content // empty' <<<"$R" 2>/dev/null || true)
+  if [ -n "$TXT" ]; then
+    read -r PIN POUT PLAT MOD < <(jq -r '[.usage.prompt_tokens//0, .usage.completion_tokens//0, ._routed_via.platform//"?", .model//"?"]|@tsv' <<<"$R")
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\tok\n" "$(date -Is)" "$TIER" "$TAG" "$MOD" "$PLAT" "$PIN" "$POUT" "$secs" >>"$LOG"
+    if [ -n "$OUT" ]; then printf "%s\n" "$TXT" >"$OUT"; else printf "%s\n" "$TXT"; fi
+    echo "[fllm: $TIER via $PLAT/$MOD, ${PIN}+${POUT} tok, ${secs}s]" >&2
+    exit 0
+  fi
+  ERR=$(jq -r '.error.message // .error // "no content"' <<<"$R" 2>/dev/null | head -c 160 || echo "bad response")
+  printf "%s\t%s\t%s\t%s\t-\t0\t0\t%s\tfail\n" "$(date -Is)" "$TIER" "$TAG" "$M" "$secs" >>"$LOG"
+  echo "[fllm: $M failed: $ERR, trying next]" >&2
+done
+echo "fllm: every model in tier '$TIER' failed" >&2; exit 1
